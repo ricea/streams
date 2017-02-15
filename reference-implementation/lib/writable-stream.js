@@ -3,7 +3,7 @@ const assert = require('assert');
 const { InvokeOrNoop, PromiseInvokeOrNoop, ValidateAndNormalizeQueuingStrategy, typeIsObject } =
   require('./helpers.js');
 const { rethrowAssertionErrorRejection } = require('./utils.js');
-const { DequeueValue, EnqueueValueWithSize, PeekQueueValue, ResetQueue } = require('./queue-with-sizes.js');
+const { DequeueValue, EnqueueValueWithSize, ResetQueue } = require('./queue-with-sizes.js');
 
 class WritableStream {
   constructor(underlyingSink = {}, { size, highWaterMark = 1 } = {}) {
@@ -125,7 +125,14 @@ function WritableStreamAbort(stream, reason) {
   assert(state === 'writable' || state === 'closing', 'state must be writable or closing');
 
   const controller = stream._writableStreamController;
+
   assert(controller !== undefined, 'controller must not be undefined');
+
+  ResetQueue(controller);
+  EnqueueValueWithSize(controller, {
+    action: 'abort',
+    value: reason
+  }, 0);
 
   let readyPromiseIsPending = false;
   if (state === 'writable' &&
@@ -133,20 +140,10 @@ function WritableStreamAbort(stream, reason) {
     readyPromiseIsPending = true;
   }
 
-  if (controller._writing === false && controller._inClose === false) {
-    if (stream._writer !== undefined) {
-      WritableStreamDefaultWriterEnsureReadyPromiseRejectedWith(
-          stream._writer, error, readyPromiseIsPending);
-    }
-    WritableStreamFinishAbort(stream);
-    return WritableStreamDefaultControllerAbort(controller, reason);
-  }
-
   const promise = new Promise((resolve, reject) => {
     stream._pendingAbortRequest = {
       _resolve: resolve,
-      _reject: reject,
-      _reason: reason
+      _reject: reject
     };
   });
 
@@ -154,14 +151,9 @@ function WritableStreamAbort(stream, reason) {
     WritableStreamDefaultWriterEnsureReadyPromiseRejectedWith(stream._writer, error, readyPromiseIsPending);
   }
 
+  WritableStreamDefaultControllerAdvanceQueueIfNeeded(controller);
+
   return promise;
-}
-
-function WritableStreamFinishAbort(stream) {
-  stream._state = 'errored';
-  stream._storedError = new TypeError('Aborted');
-
-  WritableStreamRejectPromisesInReactionToError(stream);
 }
 
 // WritableStream API exposed for controllers.
@@ -189,37 +181,9 @@ function WritableStreamFinishPendingWrite(stream) {
 
   const state = stream._state;
 
-  let wasAborted = false;
-  if (stream._pendingAbortRequest !== undefined) {
-    wasAborted = true;
-  }
-
   if (state === 'errored') {
-    if (wasAborted === true) {
-      stream._pendingAbortRequest._reject(stream._storedError);
-      stream._pendingAbortRequest = undefined;
-    }
-
     WritableStreamRejectPromisesInReactionToError(stream);
-
-    return;
   }
-
-  const controller = stream._writableStreamController;
-
-  if (wasAborted === false) {
-    return;
-  }
-
-  WritableStreamFinishAbort(stream, state);
-
-  const abortRequest = stream._pendingAbortRequest;
-  stream._pendingAbortRequest = undefined;
-  const promise = WritableStreamDefaultControllerAbort(controller, abortRequest._reason);
-  promise.then(
-    abortRequest._resolve,
-    abortRequest._reject
-  );
 }
 
 function WritableStreamFinishPendingWriteWithError(stream, reason) {
@@ -238,11 +202,6 @@ function WritableStreamFinishPendingWriteWithError(stream, reason) {
   if (state === 'writable' && wasAborted === false &&
       WritableStreamDefaultControllerGetBackpressure(stream._writableStreamController) === true) {
     readyPromiseIsPending = true;
-  }
-
-  if (wasAborted === true) {
-    stream._pendingAbortRequest._reject(reason);
-    stream._pendingAbortRequest = undefined;
   }
 
   if (state === 'errored') {
@@ -274,11 +233,6 @@ function WritableStreamFinishPendingClose(stream) {
   }
 
   if (state === 'errored') {
-    if (wasAborted === true) {
-      stream._pendingAbortRequest._reject(stream._storedError);
-      stream._pendingAbortRequest = undefined;
-    }
-
     WritableStreamRejectClosedPromiseIfAny(stream);
 
     return;
@@ -294,9 +248,6 @@ function WritableStreamFinishPendingClose(stream) {
     stream._state = 'closed';
     return;
   }
-
-  stream._pendingAbortRequest._resolve();
-  stream._pendingAbortRequest = undefined;
 
   stream._state = 'errored';
   stream._storedError = new TypeError('Abort requested but closed successfully');
@@ -320,11 +271,6 @@ function WritableStreamFinishPendingCloseWithError(stream, reason) {
   if (state === 'writable' && wasAborted === false &&
       WritableStreamDefaultControllerGetBackpressure(stream._writableStreamController) === true) {
     readyPromiseIsPending = true;
-  }
-
-  if (wasAborted === true) {
-    stream._pendingAbortRequest._reject(reason);
-    stream._pendingAbortRequest = undefined;
   }
 
   if (state === 'errored') {
@@ -579,7 +525,6 @@ function WritableStreamDefaultWriterClose(writer) {
   return promise;
 }
 
-
 function WritableStreamDefaultWriterCloseWithErrorPropagation(writer) {
   const stream = writer._ownerWritableStream;
 
@@ -746,7 +691,10 @@ function WritableStreamDefaultControllerAbort(controller, reason) {
 }
 
 function WritableStreamDefaultControllerClose(controller) {
-  EnqueueValueWithSize(controller, 'close', 0);
+  EnqueueValueWithSize(controller, {
+    action: 'close',
+    value: undefined
+  }, 0);
   WritableStreamDefaultControllerAdvanceQueueIfNeeded(controller);
 }
 
@@ -784,12 +732,15 @@ function WritableStreamDefaultControllerWrite(controller, chunk) {
     }
   }
 
-  const writeRecord = { chunk };
+  const queueActionRecord = {
+    action: 'write',
+    value: chunk
+  };
 
   const oldBackpressure = WritableStreamDefaultControllerGetBackpressure(controller);
 
   try {
-    EnqueueValueWithSize(controller, writeRecord, chunkSize);
+    EnqueueValueWithSize(controller, queueActionRecord, chunkSize);
   } catch (enqueueE) {
     WritableStreamDefaultControllerErrorIfNeeded(controller, enqueueE);
     return;
@@ -832,11 +783,16 @@ function WritableStreamDefaultControllerAdvanceQueueIfNeeded(controller) {
     return;
   }
 
-  const writeRecord = PeekQueueValue(controller);
-  if (writeRecord === 'close') {
+  const queueActionRecord = DequeueValue(controller);
+  const action = queueActionRecord.action;
+  const value = queueActionRecord.value;
+  if (action === 'close') {
     WritableStreamDefaultControllerProcessClose(controller);
+  } else if (action === 'abort') {
+    WritableStreamDefaultControllerProcessAbort(controller, value);
   } else {
-    WritableStreamDefaultControllerProcessWrite(controller, writeRecord.chunk);
+    assert(action === 'write');
+    WritableStreamDefaultControllerProcessWrite(controller, value);
   }
 }
 
@@ -847,12 +803,50 @@ function WritableStreamDefaultControllerErrorIfNeeded(controller, e) {
   }
 }
 
+function WritableStreamDefaultControllerProcessAbort(controller, reason) {
+  const stream = controller._controlledWritableStream;
+  const state = stream._state;
+  let wasErrored = false;
+  if (state === 'errored') {
+    wasErrored = true;
+  }
+  let wasClosed = false;
+  if (state === 'closed') {
+    wasClosed = true;
+  }
+
+  if (!wasErrored) {
+    stream._state = 'errored';
+    stream._storedError = new TypeError('Aborted');
+  }
+
+  const abortRequest = stream._pendingAbortRequest;
+  stream._pendingAbortRequest = undefined;
+  if (wasErrored) {
+    abortRequest._reject(stream._storedError);
+  }
+  if (wasClosed) {
+    abortRequest._resolve();
+  }
+
+  WritableStreamRejectPromisesInReactionToError(stream);
+
+  if (wasErrored || wasClosed) {
+    return;
+  }
+
+  const promise = WritableStreamDefaultControllerAbort(controller, reason);
+  promise.then(
+    abortRequest._resolve,
+    abortRequest._reject
+  );
+}
+
 function WritableStreamDefaultControllerProcessClose(controller) {
   const stream = controller._controlledWritableStream;
 
   assert(stream._state === 'closing', 'can\'t process final write record unless already closed');
 
-  DequeueValue(controller);
   assert(controller._queue.length === 0, 'queue must be empty once the final write record is dequeued');
 
   controller._inClose = true;
@@ -898,7 +892,6 @@ function WritableStreamDefaultControllerProcessWrite(controller, chunk) {
       assert(state === 'closing' || state === 'writable');
 
       const oldBackpressure = WritableStreamDefaultControllerGetBackpressure(controller);
-      DequeueValue(controller);
       WritableStreamDefaultControllerUpdateBackpressureIfNeeded(controller, oldBackpressure);
 
       WritableStreamDefaultControllerAdvanceQueueIfNeeded(controller);
