@@ -1007,6 +1007,7 @@ function defaultWriterClosedPromiseResolve(writer) {
 }
 
 function defaultWriterReadyPromiseInitialize(writer) {
+  console.trace('defaultWriterReadyPromiseInitialize');
   writer._readyPromise = new Promise((resolve, reject) => {
     writer._readyPromise_resolve = resolve;
     writer._readyPromise_reject = reject;
@@ -1014,12 +1015,14 @@ function defaultWriterReadyPromiseInitialize(writer) {
 }
 
 function defaultWriterReadyPromiseInitializeAsResolved(writer) {
+  console.trace('defaultWriterReadyPromiseInitializeAsResolved');
   writer._readyPromise = Promise.resolve(undefined);
   writer._readyPromise_resolve = undefined;
   writer._readyPromise_reject = undefined;
 }
 
 function defaultWriterReadyPromiseReject(writer, reason) {
+  console.trace('defaultWriterReadyPromiseReject');
   assert(writer._readyPromise_resolve !== undefined);
   assert(writer._readyPromise_reject !== undefined);
 
@@ -1029,6 +1032,8 @@ function defaultWriterReadyPromiseReject(writer, reason) {
 }
 
 function defaultWriterReadyPromiseReset(writer) {
+  console.trace('defaultWriterReadyPromiseReset');
+
   assert(writer._readyPromise_resolve === undefined);
   assert(writer._readyPromise_reject === undefined);
 
@@ -1039,6 +1044,7 @@ function defaultWriterReadyPromiseReset(writer) {
 }
 
 function defaultWriterReadyPromiseResetToRejected(writer, reason) {
+  console.trace('defaultWriterReadyPromiseResetToRejected');
   assert(writer._readyPromise_resolve === undefined);
   assert(writer._readyPromise_reject === undefined);
 
@@ -1046,6 +1052,7 @@ function defaultWriterReadyPromiseResetToRejected(writer, reason) {
 }
 
 function defaultWriterReadyPromiseResolve(writer) {
+  console.trace('defaultWriterReadyPromiseResolve');
   assert(writer._readyPromise_resolve !== undefined);
   assert(writer._readyPromise_reject !== undefined);
 
