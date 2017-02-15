@@ -125,7 +125,6 @@ function WritableStreamAbort(stream, reason) {
   assert(state === 'writable' || state === 'closing', 'state must be writable or closing');
 
   const controller = stream._writableStreamController;
-
   assert(controller !== undefined, 'controller must not be undefined');
 
   ResetQueue(controller);
